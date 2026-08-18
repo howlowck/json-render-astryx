@@ -1,6 +1,12 @@
+import { useState } from "react";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
 import { Text } from "@astryxdesign/core/Text";
+import {
+  SegmentedControl,
+  SegmentedControlItem,
+} from "@astryxdesign/core/SegmentedControl";
 import type { Spec } from "@json-render/react";
+import { catalogComponents } from "./registry";
 
 const INSTALL = `npm install json-render-astryx @json-render/core @json-render/react \\
   @astryxdesign/core @stylexjs/stylex zod`;
@@ -92,21 +98,82 @@ export function GettingStartedPane() {
   );
 }
 
-/** The live JSON spec currently rendered in the Preview pane. */
-export function SpecPane({ spec }: { spec: Spec | null }) {
+/**
+ * Behind-the-scenes view of the current generation with three sub-views:
+ * - Spec: the compiled JSON spec being rendered in the Preview.
+ * - Stream: the raw JSONL patch operations the model streamed (SpecStream).
+ * - Catalog: the components registered with the renderer.
+ */
+export function SpecPane({
+  spec,
+  lines,
+}: {
+  spec: Spec | null;
+  lines: string[];
+}) {
+  const [subView, setSubView] = useState("spec");
+
   const specJson = spec
     ? JSON.stringify(spec, null, 2)
     : "// Generate a UI in the chat to see the JSON spec the model produced.";
 
+  const streamJsonl =
+    lines.length > 0
+      ? lines.join("\n")
+      : "// SpecStream patch operations (JSONL) appear here as the model streams.";
+
+  const catalogJson = JSON.stringify(
+    catalogComponents.map(({ name, description, isContainer }) => ({
+      name,
+      container: isContainer,
+      description,
+    })),
+    null,
+    2,
+  );
+
   return (
     <div className="code-pane">
-      <CodeBlock
-        title="Rendered spec"
-        language="json"
-        code={specJson}
-        hasCopyButton
-        width="100%"
-      />
+      <div className="code-subtoggle">
+        <SegmentedControl
+          value={subView}
+          onChange={setSubView}
+          label="Code view"
+          size="sm"
+        >
+          <SegmentedControlItem value="spec" label="Spec" />
+          <SegmentedControlItem value="stream" label="Stream" />
+          <SegmentedControlItem value="catalog" label="Catalog" />
+        </SegmentedControl>
+      </div>
+
+      {subView === "spec" && (
+        <CodeBlock
+          title="Rendered spec"
+          language="json"
+          code={specJson}
+          hasCopyButton
+          width="100%"
+        />
+      )}
+      {subView === "stream" && (
+        <CodeBlock
+          title="SpecStream — JSONL patches"
+          language="json"
+          code={streamJsonl}
+          hasCopyButton
+          width="100%"
+        />
+      )}
+      {subView === "catalog" && (
+        <CodeBlock
+          title={`Registered components (${catalogComponents.length})`}
+          language="json"
+          code={catalogJson}
+          hasCopyButton
+          width="100%"
+        />
+      )}
     </div>
   );
 }

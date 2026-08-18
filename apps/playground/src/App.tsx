@@ -9,10 +9,11 @@ import {
 } from "@astryxdesign/core/Chat";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
+import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
+import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
+import { Link } from "@astryxdesign/core/Link";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Icon } from "@astryxdesign/core/Icon";
-import { IconButton } from "@astryxdesign/core/IconButton";
-import { Popover } from "@astryxdesign/core/Popover";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Text } from "@astryxdesign/core/Text";
@@ -28,9 +29,9 @@ import {
   VisibilityProvider,
   type Spec,
 } from "@json-render/react";
-import { SparklesIcon } from "@heroicons/react/24/outline";
+import { SparklesIcon, Cog6ToothIcon, BoltIcon, BoltSlashIcon } from "@heroicons/react/24/outline";
 import { registry } from "./registry";
-import { checkOllama, generateSpec, isModelInstalled } from "./generate";
+import { checkOllama, streamSpec, isModelInstalled } from "./generate";
 import { GettingStartedPane, SpecPane } from "./CodePane";
 
 interface Message {
@@ -45,8 +46,11 @@ interface Message {
 
 const MODEL_STORAGE = "astryx-playground-ollama-model";
 const PORT_STORAGE = "astryx-playground-ollama-port";
+const SOURCE_STORAGE = "astryx-playground-source";
+const STREAM_STORAGE = "astryx-playground-stream";
 const DEFAULT_MODEL = "Select a model…";
 const DEFAULT_PORT = "11434";
+const OLLAMA_DOWNLOAD_URL = "https://ollama.com/download";
 
 const SUGGESTIONS = [
   "A signup form with name, email, and a subscribe toggle",
@@ -73,6 +77,7 @@ export function App() {
   const [input, setInput] = useState("");
   const [spec, setSpec] = useState<Spec | null>(null);
   const [specVersion, setSpecVersion] = useState(0);
+  const [streamLines, setStreamLines] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState("preview");
   const [model, setModel] = useState(() =>
@@ -85,6 +90,18 @@ export function App() {
     "checking" | "online" | "model-missing" | "offline"
   >("checking");
   const [models, setModels] = useState<string[]>([]);
+  const [source, setSource] = useState<"preset" | "ollama">(() => {
+    const saved = stored(SOURCE_STORAGE, "");
+    return saved === "ollama" || saved === "preset" ? saved : "preset";
+  });
+  // While true, the source follows Ollama availability (auto-enable). A manual
+  // toggle turns this off so the user's explicit choice always wins.
+  const [sourceAuto, setSourceAuto] = useState(() => !stored(SOURCE_STORAGE, ""));
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [troubleshootOpen, setTroubleshootOpen] = useState(false);
+  const [streaming, setStreaming] = useState(
+    () => stored(STREAM_STORAGE, "true") !== "false",
+  );
 
   // Probe Ollama on load and whenever the port or model changes (debounced).
   useEffect(() => {
@@ -101,18 +118,32 @@ export function App() {
         } else {
           setHealth("model-missing");
         }
+        // Auto-enable Ollama when it's reachable, until the user makes an
+        // explicit choice in Settings. Only ever turns Ollama *on* — if it
+        // later goes unreachable we stay in Ollama mode and surface the
+        // Troubleshoot flow instead of silently falling back to Preset.
+        if (sourceAuto && status.reachable) {
+          setSource("ollama");
+        }
       });
     }, 350);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [port, model]);
+  }, [port, model, sourceAuto]);
 
   function persist(key: string, value: string) {
     if (typeof localStorage !== "undefined") {
       localStorage.setItem(key, value);
     }
+  }
+
+  function handleSourceChange(value: string) {
+    const next = value === "ollama" ? "ollama" : "preset";
+    setSource(next);
+    setSourceAuto(false);
+    persist(SOURCE_STORAGE, next);
   }
 
   async function handleSubmit(value: string) {
@@ -121,43 +152,53 @@ export function App() {
 
     const base = Date.now();
     const modelUsed = model.trim() || DEFAULT_MODEL;
-    const history = messages.map((message) => ({
-      role: message.role,
-      content:
-        message.role === "assistant" && message.spec
-          ? JSON.stringify(message.spec)
-          : message.text,
-    }));
+    const baseSpec = spec;
     setInput("");
     setMessages((prev) => [
       ...prev,
       { id: base, role: "user", text, time: now() },
     ]);
     setBusy(true);
+    setStreamLines([]);
+    setView("preview");
 
-    const { spec: next, mode, reason } = await generateSpec(
+    const { spec: next, mode, reason } = await streamSpec(
       text,
       {
         model: modelUsed,
         port: port.trim() || DEFAULT_PORT,
+        source,
+        stream: streaming,
       },
-      history,
+      baseSpec,
+      {
+        onSpec: (partial) => setSpec(partial),
+        onLines: (newLines) =>
+          setStreamLines((prev) => [...prev, ...newLines]),
+      },
     );
     setSpec(next);
+    // Remount so the finished document seeds the state store from its (now
+    // complete) `spec.state` — the `/state` patches stream in last.
     setSpecVersion((version) => version + 1);
-    setView("preview");
+    const footer =
+      source === "preset"
+        ? "Preset"
+        : mode === "live"
+          ? `Ollama · ${modelUsed}`
+          : "mock spec";
     setMessages((prev) => [
       ...prev,
       {
         id: base + 1,
         role: "assistant",
         time: now(),
-        footer: mode === "live" ? `Ollama · ${modelUsed}` : "mock spec",
+        footer,
         spec: next,
         text:
           mode === "live"
             ? "Here's your UI — see the Preview."
-            : (reason ?? "Rendered a mock UI — see the Preview."),
+            : (reason ?? "Rendered a UI — see the Preview."),
       },
     ]);
     setBusy(false);
@@ -167,6 +208,7 @@ export function App() {
     if (busy) return;
     setMessages([]);
     setSpec(null);
+    setStreamLines([]);
     setInput("");
     setView("preview");
   }
@@ -217,53 +259,86 @@ export function App() {
       <header className="topbar">
         <div className="brand"><code>json-render-astryx</code> Playground</div>
         <div className="topbar-right">
-          <Popover
+          {source === "ollama" && (
+            <span className={`status status--${health}`} role="status">
+              <span className="status-dot" aria-hidden="true" />
+              {statusLabel}
+            </span>
+          )}
+
+          <DropdownMenu
             placement="below"
             alignment="end"
-            width={340}
-            content={
-              <div className="info-pop">
-                <Text weight="medium">Local Ollama, in your browser</Text>
-                <Text color="secondary">
-                  Prompts are sent to your local Ollama server directly from the
-                  browser — nothing leaves your machine. Ollama must be running
-                  with the model pulled. If the browser is blocked by CORS, start
-                  it with <Code>OLLAMA_ORIGINS=http://localhost:5173</Code>. When
-                  Ollama is unreachable, the playground renders offline mock specs.
+            menuWidth={288}
+            isMenuOpen={settingsOpen}
+            onOpenChange={setSettingsOpen}
+            button={{
+              label: "Settings",
+              icon: <Icon icon={Cog6ToothIcon} size="sm" />,
+              variant: "ghost",
+              size: "sm",
+            }}
+          >
+            <div
+              className="settings-menu"
+              onKeyDown={(event) => event.stopPropagation()}
+            >
+              <div className="settings-row">
+                <Text weight="medium">Generation source</Text>
+                <SegmentedControl
+                  value={source}
+                  onChange={handleSourceChange}
+                  label="Generation source"
+                  size="sm"
+                >
+                  <SegmentedControlItem value="preset" label="Preset" />
+                  <SegmentedControlItem value="ollama" label="Ollama" />
+                </SegmentedControl>
+                <Text color="secondary" size="sm">
+                  {source === "ollama"
+                    ? "Stream live UIs from your local Ollama server."
+                    : "Render built-in sample UIs — no model required."}
                 </Text>
               </div>
-            }
-          >
-            <IconButton
-              icon={<Icon icon="info" />}
-              label="About the Ollama connection"
-              variant="ghost"
-              size="sm"
-            />
-          </Popover>
 
-          <span className={`status status--${health}`} role="status">
-            <span className="status-dot" aria-hidden="true" />
-            {statusLabel}
-          </span>
+              {source === "ollama" && (
+                <div className="settings-row">
+                  <label className="field">
+                    <span className="field-label">Ollama port</span>
+                    <input
+                      className="field-input field-input--port"
+                      value={port}
+                      onChange={(event) => {
+                        setPort(event.target.value);
+                        persist(PORT_STORAGE, event.target.value);
+                      }}
+                      placeholder={DEFAULT_PORT}
+                      inputMode="numeric"
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                  </label>
 
-          <div className="controls">
-            <label className="field">
-              <span className="field-label">Ollama port</span>
-              <input
-                className="field-input field-input--port"
-                value={port}
-                onChange={(event) => {
-                  setPort(event.target.value);
-                  persist(PORT_STORAGE, event.target.value);
-                }}
-                placeholder={DEFAULT_PORT}
-                inputMode="numeric"
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </label>
-          </div>
+                  {health === "offline" && (
+                    <div className="settings-alert">
+                      <Text color="secondary" size="sm">
+                        Ollama isn't reachable on port {port.trim() || DEFAULT_PORT}.
+                      </Text>
+                      <Button
+                        label="Troubleshoot"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          setSettingsOpen(false);
+                          setTroubleshootOpen(true);
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </DropdownMenu>
         </div>
       </header>
 
@@ -288,31 +363,68 @@ export function App() {
                 placeholder="Describe a UI…"
                 isDisabled={busy}
                 footerActions={
-                  <DropdownMenu
-                    hasChevron
-                    button={{
-                      label: model.trim() || DEFAULT_MODEL,
-                      icon: <Icon icon={SparklesIcon} size="sm" />,
-                      variant: "ghost",
-                      size: "md",
-                      isDisabled: busy
-                    }}
-                    items={
-                      models.length > 0
-                        ? models.map((name) => ({
-                            label: name,
-                            icon:
-                              name === model ? (
-                                <Icon icon="check" />
-                              ) : undefined,
+                  source === "ollama" ? (
+                    <>
+                      <DropdownMenu
+                        hasChevron
+                        button={{
+                          label: streaming ? "Streaming" : "Static",
+                          icon: (
+                            <Icon
+                              icon={streaming ? BoltIcon : BoltSlashIcon}
+                              size="sm"
+                            />
+                          ),
+                          variant: "ghost",
+                          size: "md",
+                          isDisabled: busy,
+                        }}
+                        items={[
+                          {
+                            label: "Streaming",
+                            icon: streaming ? <Icon icon="check" /> : undefined,
                             onClick: () => {
-                              setModel(name);
-                              persist(MODEL_STORAGE, name);
+                              setStreaming(true);
+                              persist(STREAM_STORAGE, "true");
                             },
-                          }))
-                        : [{ label: "No models found", isDisabled: true }]
-                    }
-                  />
+                          },
+                          {
+                            label: "Static",
+                            icon: !streaming ? <Icon icon="check" /> : undefined,
+                            onClick: () => {
+                              setStreaming(false);
+                              persist(STREAM_STORAGE, "false");
+                            },
+                          },
+                        ]}
+                      />
+                      <DropdownMenu
+                        hasChevron
+                        button={{
+                          label: model.trim() || DEFAULT_MODEL,
+                          icon: <Icon icon={SparklesIcon} size="sm" />,
+                          variant: "ghost",
+                          size: "md",
+                          isDisabled: busy
+                        }}
+                        items={
+                          models.length > 0
+                            ? models.map((name) => ({
+                                label: name,
+                                icon:
+                                  name === model ? (
+                                    <Icon icon="check" />
+                                  ) : undefined,
+                                onClick: () => {
+                                  setModel(name);
+                                  persist(MODEL_STORAGE, name);
+                                },
+                              }))
+                            : [{ label: "No models found", isDisabled: true }]
+                        }
+                      />
+                    </>
+                  ) : undefined
                 }
               />
             }
@@ -383,12 +495,17 @@ export function App() {
             {view === "guide" ? (
               <GettingStartedPane />
             ) : view === "code" ? (
-              <SpecPane spec={spec} />
+              <SpecPane spec={spec} lines={streamLines} />
             ) : spec ? (
-              <StateProvider key={specVersion} initialState={{}}>
+              <StateProvider
+                key={specVersion}
+                initialState={
+                  (spec as { state?: Record<string, unknown> }).state ?? {}
+                }
+              >
                 <ActionProvider handlers={{}}>
                   <VisibilityProvider>
-                    <Renderer spec={spec} registry={registry} />
+                    <Renderer spec={spec} registry={registry} loading={busy} />
                   </VisibilityProvider>
                 </ActionProvider>
               </StateProvider>
@@ -400,6 +517,68 @@ export function App() {
           </div>
         </section>
       </main>
+
+      <Dialog
+        isOpen={troubleshootOpen}
+        onOpenChange={setTroubleshootOpen}
+        width={480}
+        purpose="info"
+      >
+        <Layout
+          header={
+            <DialogHeader
+              title="Troubleshoot Ollama"
+              subtitle="Get a local model running, then come back."
+              onOpenChange={setTroubleshootOpen}
+            />
+          }
+          content={
+            <LayoutContent>
+              <ol className="dialog-steps">
+                <li>
+                  <Text weight="medium">Install Ollama</Text>
+                  <Text color="secondary" size="sm">
+                    Download and install it from{" "}
+                    <Link href={OLLAMA_DOWNLOAD_URL} target="_blank">
+                      ollama.com/download
+                    </Link>
+                    , then launch the app.
+                  </Text>
+                </li>
+                <li>
+                  <Text weight="medium">Download a chat model</Text>
+                  <Text color="secondary" size="sm">
+                    In a terminal, pull a chat-completion model, for example{" "}
+                    <Code>ollama pull llama3.2</Code>.
+                  </Text>
+                </li>
+                <li>
+                  <Text weight="medium">Refresh this page</Text>
+                  <Text color="secondary" size="sm">
+                    Once Ollama is running with a model, reload to reconnect.
+                  </Text>
+                </li>
+              </ol>
+            </LayoutContent>
+          }
+          footer={
+            <LayoutFooter hasDivider>
+              <div className="dialog-actions">
+                <Button
+                  label="Close"
+                  variant="secondary"
+                  onClick={() => setTroubleshootOpen(false)}
+                />
+                <Button
+                  label="Refresh this page"
+                  variant="primary"
+                  onClick={() => window.location.reload()}
+                />
+              </div>
+            </LayoutFooter>
+          }
+        />
+      </Dialog>
     </div>
   );
 }

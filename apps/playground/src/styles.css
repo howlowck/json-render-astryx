@@ -144,6 +144,72 @@ select.field-input {
   max-width: 340px;
 }
 
+/* ---------- Settings menu ---------- */
+
+.settings-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 12px;
+  min-width: 256px;
+}
+
+.settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-row .field-input--port {
+  width: 100%;
+}
+
+.settings-alert {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--astryx-color-background-neutral-subtle, rgba(207, 34, 46, 0.06));
+  border: 1px solid var(--astryx-color-border-neutral, rgba(207, 34, 46, 0.2));
+}
+
+/* ---------- Troubleshoot dialog ---------- */
+
+.dialog-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.dialog-steps li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: relative;
+  padding-left: 30px;
+  counter-increment: step;
+}
+
+.dialog-steps li::before {
+  content: counter(step) ".";
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-weight: 600;
+  color: var(--astryx-color-content-secondary, #888);
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 10px;
+}
+
 /* ---------- Panes ---------- */
 
 .panes {
@@ -270,6 +336,10 @@ select.field-input {
   flex-direction: column;
   gap: 16px;
   max-width: 820px;
+}
+
+.code-subtoggle {
+  display: flex;
 }
 
 /* ---------- Responsive ---------- */

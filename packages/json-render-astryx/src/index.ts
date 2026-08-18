@@ -1,0 +1,1 @@
+export { astryxComponents } from "./components";

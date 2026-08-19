@@ -49,99 +49,9 @@ body {
   gap: 12px;
 }
 
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
 .field-label {
   font-size: 11px;
   color: var(--astryx-color-content-secondary, #888);
-}
-
-.field-input {
-  width: 200px;
-  padding: 6px 10px;
-  border: 1px solid var(--astryx-color-border-neutral, #d4d4d4);
-  border-radius: 8px;
-  font-size: 13px;
-}
-
-select.field-input {
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  background-color: transparent;
-  color: inherit;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  padding-right: 28px;
-}
-
-.field-input--port {
-  width: 90px;
-}
-
-/* ---------- Status indicator ---------- */
-
-.status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding-bottom: 6px;
-  font-size: 12px;
-  white-space: nowrap;
-  color: var(--astryx-color-content-secondary, #888);
-}
-
-.status-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #b0b0b0;
-}
-
-.status--checking {
-  color: #8a6d0b;
-}
-
-.status--checking .status-dot {
-  background: #d4a72c;
-}
-
-.status--model-missing {
-  color: #9a3412;
-}
-
-.status--model-missing .status-dot {
-  background: #e8590c;
-}
-
-.status--online {
-  color: #1a7f37;
-}
-
-.status--online .status-dot {
-  background: #1a7f37;
-}
-
-.status--offline {
-  color: #cf222e;
-}
-
-.status--offline .status-dot {
-  background: #cf222e;
-}
-
-/* ---------- Info popover ---------- */
-
-.info-pop {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 340px;
 }
 
 /* ---------- Settings menu ---------- */
@@ -160,10 +70,6 @@ select.field-input {
   gap: 8px;
 }
 
-.settings-row .field-input--port {
-  width: 100%;
-}
-
 .settings-alert {
   display: flex;
   flex-direction: column;
@@ -175,39 +81,104 @@ select.field-input {
   border: 1px solid var(--astryx-color-border-neutral, rgba(207, 34, 46, 0.2));
 }
 
-/* ---------- Troubleshoot dialog ---------- */
+/* ---------- WebLLM model lifecycle ---------- */
 
-.dialog-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  margin: 0;
-  padding-left: 0;
-  list-style: none;
-  counter-reset: step;
+.model-settings {
+  gap: 6px;
 }
 
-.dialog-steps li {
+.model-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.model-status progress {
+  width: 100%;
+  height: 6px;
+  border-radius: 6px;
+}
+
+.model-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------- WebLLM model list ---------- */
+
+.model-list {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  position: relative;
-  padding-left: 30px;
-  counter-increment: step;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--astryx-color-border-neutral, #d4d4d4);
+  border-radius: 8px;
 }
 
-.dialog-steps li::before {
-  content: counter(step) ".";
-  position: absolute;
-  left: 0;
-  top: 0;
+.model-option {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--astryx-color-content-primary, inherit);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  transition: background 120ms ease;
+}
+
+.model-option:hover:not(:disabled) {
+  background: var(--astryx-color-surface-accent-subtle, rgba(90, 120, 255, 0.08));
+}
+
+.model-option[aria-selected="true"] {
+  background: var(--astryx-color-surface-accent-subtle, rgba(90, 120, 255, 0.12));
   font-weight: 600;
+}
+
+.model-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.model-option-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  color: var(--astryx-color-content-accent, #5a78ff);
+}
+
+.model-option-id {
+  min-width: 0;
+}
+
+.model-option-cached {
+  display: inline-flex;
+  align-items: center;
   color: var(--astryx-color-content-secondary, #888);
 }
 
-.dialog-actions {
-  display: flex;
-  gap: 10px;
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  border-radius: 8px;
+  color: var(--astryx-color-content-secondary, #888);
+  border: 1px solid var(--astryx-color-border-neutral, #d4d4d4);
 }
 
 /* ---------- Panes ---------- */
@@ -290,6 +261,14 @@ select.field-input {
   border-color: var(--astryx-color-border-accent, #5a78ff);
   background: var(--astryx-color-surface-accent-subtle, rgba(90, 120, 255, 0.08));
   transform: translateY(-1px);
+}
+
+.suggestion:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  transform: none;
+  border-color: var(--astryx-color-border-neutral, #d4d4d4);
+  background: var(--astryx-color-surface-neutral, transparent);
 }
 
 .thinking {

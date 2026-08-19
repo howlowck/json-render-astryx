@@ -1,7 +1,7 @@
 # Contributing to json-render-astryx
 
-This guide covers local validation, the one-time first publish, npm trusted
-publisher setup, and the tag-driven release procedure for later versions.
+This guide covers local validation, npm trusted publisher setup, and the
+tag-driven release procedure for later versions.
 
 ## Prerequisites
 
@@ -23,16 +23,15 @@ pnpm build
 pnpm --filter json-render-astryx exec npm pack --dry-run --json
 ```
 
-The dry run lists the tarball contents. Expect `package.json` and the built
-`dist/` outputs, and no `src` or workspace files.
+The dry run lists the tarball contents. Expect `README.md`, `package.json`, and
+the built `dist/` outputs, with no `src`, workspace files, or generated `.tgz`.
 
 ## Default-branch preflight
 
-Run this preflight before the bootstrap publish and again before every release
-tag. It resolves origin's real default branch, brings it local, fast-forwards
-to the remote tip, and refuses to continue unless the checkout is clean and
-identical to the remote, so no publish or tag ever inherits an arbitrary or
-stale `HEAD`.
+Run this preflight before every release tag. It resolves origin's real default
+branch, brings it local, fast-forwards to the remote tip, and refuses to
+continue unless the checkout is clean and identical to the remote, so no tag
+ever inherits an arbitrary or stale `HEAD`.
 
 ```bash
 DEFAULT_BRANCH="$(git remote show origin | sed -n 's/.*HEAD branch: //p')"
@@ -47,87 +46,13 @@ The two `test` commands are gates. The first fails if the working tree or index
 has any pending change; the second fails unless local `HEAD` matches
 `origin/${DEFAULT_BRANCH}` exactly. Resolve any failure before continuing.
 
-## One-time bootstrap publish (0.1.0)
+## Bootstrap publication status
 
-`json-render-astryx@0.1.0` is not on the registry yet; `npm view
-json-render-astryx` returned a 404 on 2026-08-17. npm trusted publishers can
-only be configured from an existing package settings page, and OpenID Connect
-publishing cannot create a package that does not exist. A maintainer publishes
-`0.1.0` once from a local authenticated session, then configures the trusted
-publisher for every later release.
+`json-render-astryx@0.1.0` was manually published on 2026-08-18. The one-time
+bootstrap is complete; do not repeat it and do not create or push a `v0.1.0`
+tag.
 
-Every npm command below pins the public registry explicitly so the bootstrap
-never inherits a different registry from local configuration:
-
-```bash
-NPM_REGISTRY="https://registry.npmjs.org/"
-```
-
-1. Run the [default-branch preflight](#default-branch-preflight) so the publish
-   comes from a clean, fully synchronized default-branch commit.
-
-2. Assert the manifest version is exactly `0.1.0`:
-
-   ```bash
-   test "$(node -p "require('./packages/json-render-astryx/package.json').version")" = "0.1.0"
-   ```
-
-3. Confirm the package is absent on the public registry:
-
-   ```bash
-   npm view json-render-astryx --registry="${NPM_REGISTRY}"
-   ```
-
-   Expect an `E404` (package not found).
-
-4. Authenticate locally against the public registry:
-
-   ```bash
-   npm login --registry="${NPM_REGISTRY}"
-   ```
-
-   Complete npm's authentication flow. On npm 11 this typically opens a browser
-   to finish sign-in, though npm may fall back to an interactive terminal
-   prompt. Provide your username, password, and one-time two-factor code only
-   inside npm's own flow. Never commit these credentials to the repository and
-   never enter them into GitHub.
-
-5. Confirm the active identity:
-
-   ```bash
-   npm whoami --registry="${NPM_REGISTRY}"
-   ```
-
-6. Run the full local gates and inspect the dry run:
-
-   ```bash
-   pnpm install --frozen-lockfile
-   pnpm typecheck
-   pnpm test
-   pnpm build
-   pnpm --filter json-render-astryx exec npm pack --dry-run --json
-   ```
-
-7. Publish the package workspace with public access:
-
-   ```bash
-   pnpm --filter json-render-astryx exec npm publish --access public --registry="${NPM_REGISTRY}"
-   ```
-
-8. Verify the publish landed on the public registry with the exact version:
-
-   ```bash
-   test "$(npm view json-render-astryx@0.1.0 version --registry="${NPM_REGISTRY}")" = "0.1.0"
-   ```
-
-Do not add an npm token to GitHub for this. All later releases authenticate
-through trusted publishing.
-
-> **Warning:** Do not push a `v0.1.0` tag after this bootstrap. The publish
-> workflow triggers on `v*` tags and would run `npm publish` for `0.1.0` a
-> second time. npm versions are immutable, so that duplicate publish fails.
-
-## Configure the npm trusted publisher (after bootstrap)
+## Configure the npm trusted publisher
 
 Open the package on npmjs.com, then go to Settings and add a GitHub Actions
 trusted publisher with these values:
@@ -147,10 +72,18 @@ process uses none; do not add an npm publishing token to this repository.
 
 ## Subsequent releases (tag-driven, tokenless)
 
-After the trusted publisher exists, each release is a pushed version tag. The
-workflow in `.github/workflows/publish.yml` checks out the tag, verifies it
-equals `v` plus the manifest version, runs the workspace gates, and publishes
-without a token.
+> **Automated publishing is currently disabled.** The release workflow in
+> `.github/workflows/publish.yml` is fully commented out, so pushing a version
+> tag today starts no GitHub Actions run and publishes nothing. Before you
+> create or push any release tag, a maintainer must restore the workflow in a
+> reviewed change and confirm the repository's GitHub Actions tab lists the
+> `Publish json-render-astryx` workflow. Do not tag a release until both are
+> done.
+
+After the trusted publisher exists and the workflow is restored, each release is
+a pushed version tag. The workflow in `.github/workflows/publish.yml` checks out
+the tag, verifies it equals `v` plus the manifest version, runs the workspace
+gates, and publishes without a token.
 
 1. Choose a semantic version bump. Run one of these inside
    `packages/json-render-astryx`:
@@ -186,10 +119,13 @@ without a token.
 4. Open a pull request with the manifest version change and any lockfile
    update the bump produced, then merge it to the default branch.
 
-5. Run the [default-branch preflight](#default-branch-preflight) again so the
-   tag lands on a clean default branch whose local `HEAD` equals the remote
-   default-branch tip. Then derive the version and create a matching annotated
-   tag:
+5. Confirm `.github/workflows/publish.yml` is restored and active before running
+   the tag commands below: the GitHub Actions tab must list the
+   `Publish json-render-astryx` workflow. A tag pushed while the workflow stays
+   commented out publishes nothing and leaves an inert tag behind. Then run the
+   [default-branch preflight](#default-branch-preflight) again so the tag lands
+   on a clean default branch whose local `HEAD` equals the remote default-branch
+   tip, derive the version, and create a matching annotated tag:
 
    ```bash
    VERSION="$(node -p "require('./packages/json-render-astryx/package.json').version")"
@@ -222,6 +158,7 @@ Every published npm version is permanent; it cannot be overwritten or reused.
 
 | Situation | What happens | Recovery |
 | --- | --- | --- |
+| Tag pushed while the publish workflow is disabled | `.github/workflows/publish.yml` is commented out, so no Actions run starts and nothing is published; the pushed tag is inert | Leave the inert tag in place; pushed tags are immutable. Restore the workflow in a reviewed change and confirm GitHub Actions lists `Publish json-render-astryx`, bump to a new version, merge, then push a new matching version tag. Never delete or move the inert tag. |
 | Tag does not match the manifest version | The verify step fails before install, tests, or publish | Leave the pushed tag in place; pushed tags are immutable. Correct the manifest version on the default branch through a reviewed change, then push a new matching version tag. Never delete or move the pushed tag. |
 | Install, typecheck, test, or build fails | The workflow stops before publish and nothing is published | Fix the failure on the default branch, bump the version, refresh the lockfile only if the bump changes it, then push a new matching version tag |
 | npm OIDC or registry failure | The version stays unpublished and the error appears in the workflow log | Before rerunning, query the exact version on the public registry with `npm view json-render-astryx@${VERSION} version --registry=https://registry.npmjs.org/`. If it returns the version, the publish already succeeded; do not rerun. If it returns `E404`, fix the trusted-publisher or registry configuration and rerun the same unchanged tag's workflow. Never delete or move the tag. |

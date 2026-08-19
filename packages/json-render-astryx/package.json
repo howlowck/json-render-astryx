@@ -19,6 +19,7 @@
     "url": "git+https://github.com/howlowck/json-render-astryx.git",
     "directory": "packages/json-render-astryx"
   },
+  "homepage": "https://howlowck.github.io/json-render-astryx/",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",

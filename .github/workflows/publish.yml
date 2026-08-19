@@ -1,57 +1,57 @@
-# name: Publish json-render-astryx
+name: Publish json-render-astryx
 
-# "on":
-#     push:
-#         tags:
-#             - "v*"
+"on":
+    push:
+        tags:
+            - "v*"
 
-# permissions:
-#     contents: read
-#     id-token: write
+permissions:
+    contents: read
+    id-token: write
 
-# jobs:
-#     publish:
-#         runs-on: ubuntu-latest
-#         steps:
-#             - name: Check out tag
-#               uses: actions/checkout@v6
+jobs:
+    publish:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check out tag
+              uses: actions/checkout@v6
 
-#             - name: Set up pnpm
-#               uses: pnpm/action-setup@v4
-#               with:
-#                   version: "10.23.0"
-#                   run_install: false
+            - name: Set up pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: "10.23.0"
+                  run_install: false
 
-#             - name: Set up Node.js
-#               uses: actions/setup-node@v6
-#               with:
-#                   node-version: "22.14.0"
-#                   package-manager-cache: false
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: "22.14.0"
+                  package-manager-cache: false
 
-#             - name: Verify tag matches package version
-#               run: |
-#                   set -euo pipefail
-#                   version="$(node -p "require('./packages/json-render-astryx/package.json').version")"
-#                   expected="v${version}"
-#                   if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
-#                     echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${expected}"
-#                     exit 1
-#                   fi
+            - name: Verify tag matches package version
+              run: |
+                  set -euo pipefail
+                  version="$(node -p "require('./packages/json-render-astryx/package.json').version")"
+                  expected="v${version}"
+                  if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
+                    echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${expected}"
+                    exit 1
+                  fi
 
-#             - name: Install npm 11.5.1
-#               run: npm install -g npm@11.5.1
+            - name: Install npm 11.5.1
+              run: npm install -g npm@11.5.1
 
-#             - name: Install dependencies
-#               run: pnpm install --frozen-lockfile
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
 
-#             - name: Typecheck
-#               run: pnpm typecheck
+            - name: Typecheck
+              run: pnpm typecheck
 
-#             - name: Test
-#               run: pnpm test
+            - name: Test
+              run: pnpm test
 
-#             - name: Build
-#               run: pnpm build
+            - name: Build
+              run: pnpm build
 
-#             - name: Publish to npm
-#               run: pnpm --filter json-render-astryx exec npm publish --access public --registry=https://registry.npmjs.org/
+            - name: Publish to npm
+              run: pnpm --filter json-render-astryx exec npm publish --access public --registry=https://registry.npmjs.org/

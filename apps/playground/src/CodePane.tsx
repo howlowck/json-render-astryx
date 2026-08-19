@@ -6,6 +6,7 @@ import {
   SegmentedControlItem,
 } from "@astryxdesign/core/SegmentedControl";
 import type { Spec } from "@json-render/react";
+import type { LlmPrompts } from "./generate";
 import { catalogComponents } from "./registry";
 
 const INSTALL = `npm install json-render-astryx @json-render/core @json-render/react \\
@@ -99,17 +100,21 @@ export function GettingStartedPane() {
 }
 
 /**
- * Behind-the-scenes view of the current generation with three sub-views:
+ * Behind-the-scenes view of the current generation with four sub-views:
  * - Spec: the compiled JSON spec being rendered in the Preview.
  * - Stream: the raw JSONL patch operations the model streamed (SpecStream).
  * - Catalog: the components registered with the renderer.
+ * - Prompt: the exact system and user prompts sent to the model on the latest
+ *   WebLLM request (empty for Preset, which sends no LLM prompt).
  */
 export function SpecPane({
   spec,
   lines,
+  prompts,
 }: {
   spec: Spec | null;
   lines: string[];
+  prompts?: LlmPrompts | null;
 }) {
   const [subView, setSubView] = useState("spec");
 
@@ -144,6 +149,7 @@ export function SpecPane({
           <SegmentedControlItem value="spec" label="Spec" />
           <SegmentedControlItem value="stream" label="Stream" />
           <SegmentedControlItem value="catalog" label="Catalog" />
+          <SegmentedControlItem value="prompt" label="Prompt" />
         </SegmentedControl>
       </div>
 
@@ -174,6 +180,29 @@ export function SpecPane({
           width="100%"
         />
       )}
+      {subView === "prompt" &&
+        (prompts ? (
+          <>
+            <CodeBlock
+              title="System instruction"
+              language="plaintext"
+              code={prompts.systemPrompt}
+              hasCopyButton
+              width="100%"
+            />
+            <CodeBlock
+              title="User prompt"
+              language="plaintext"
+              code={prompts.userPrompt}
+              hasCopyButton
+              width="100%"
+            />
+          </>
+        ) : (
+          <Text color="secondary">
+            // No LLM prompt was sent for the latest request.
+          </Text>
+        ))}
     </div>
   );
 }

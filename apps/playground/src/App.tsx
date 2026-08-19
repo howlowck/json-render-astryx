@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ChatComposer,
   ChatLayout,
@@ -9,15 +9,11 @@ import {
 } from "@astryxdesign/core/Chat";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
-import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
-import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
-import { Link } from "@astryxdesign/core/Link";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Text } from "@astryxdesign/core/Text";
-import { Code } from "@astryxdesign/core/Code";
 import {
   SegmentedControl,
   SegmentedControlItem,
@@ -27,11 +23,31 @@ import {
   Renderer,
   StateProvider,
   VisibilityProvider,
+  createStateStore,
   type Spec,
+  type StateStore,
 } from "@json-render/react";
-import { SparklesIcon, Cog6ToothIcon, BoltIcon, BoltSlashIcon } from "@heroicons/react/24/outline";
+import type { ModelRecord } from "@mlc-ai/web-llm";
+import {
+  SparklesIcon,
+  Cog6ToothIcon,
+  BoltIcon,
+  BoltSlashIcon,
+  ArrowDownTrayIcon,
+} from "@heroicons/react/24/outline";
 import { registry } from "./registry";
-import { checkOllama, streamSpec, isModelInstalled } from "./generate";
+import { streamSpec, type LlmPrompts } from "./generate";
+import {
+  DEFAULT_WEBLLM_MODEL_ID,
+  WEBLLM_PREBUILT_MODELS,
+  WebLlmError,
+  createWebLlmRuntime,
+  isWebLlmModelCached,
+  webLlmModelInfo,
+  type WebLlmLoadableModelId,
+  type WebLlmProgress,
+  type WebLlmRuntime,
+} from "./webllm";
 import { GettingStartedPane, SpecPane } from "./CodePane";
 
 interface Message {
@@ -44,13 +60,9 @@ interface Message {
   spec?: Spec;
 }
 
-const MODEL_STORAGE = "astryx-playground-ollama-model";
-const PORT_STORAGE = "astryx-playground-ollama-port";
-const SOURCE_STORAGE = "astryx-playground-source";
+const SOURCE_STORAGE = "astryx-playground-webllm-source";
+const MODEL_STORAGE = "astryx-playground-webllm-model";
 const STREAM_STORAGE = "astryx-playground-stream";
-const DEFAULT_MODEL = "Select a model…";
-const DEFAULT_PORT = "11434";
-const OLLAMA_DOWNLOAD_URL = "https://ollama.com/download";
 
 const SUGGESTIONS = [
   "A signup form with name, email, and a subscribe toggle",
@@ -65,6 +77,25 @@ function stored(key: string, fallback: string): string {
   return value ?? fallback;
 }
 
+/** True when the id is one of the selectable prebuilt LLM records. */
+function isSelectableModel(id: string): boolean {
+  return WEBLLM_PREBUILT_MODELS.some((record) => record.model_id === id);
+}
+
+/** Read the persisted model, accepting any selectable prebuilt LLM id and
+ *  falling back to the approved default when the stored value is unknown (e.g.
+ *  an old key, a removed model, or a model missing from this WebLLM build). */
+function storedModel(): WebLlmLoadableModelId {
+  const value = stored(MODEL_STORAGE, DEFAULT_WEBLLM_MODEL_ID);
+  return isSelectableModel(value) ? value : DEFAULT_WEBLLM_MODEL_ID;
+}
+
+type ModelLifecycle =
+  | { status: "idle" }
+  | { status: "loading"; progress: number; text: string }
+  | { status: "ready" }
+  | { status: "error"; message: string };
+
 function now(): string {
   return new Date().toLocaleTimeString([], {
     hour: "2-digit",
@@ -72,66 +103,129 @@ function now(): string {
   });
 }
 
-export function App() {
+/** The `state` seed a completed spec carries (streamed in last as `/state`). */
+function specState(spec: Spec | null): Record<string, unknown> {
+  return (spec as { state?: Record<string, unknown> } | null)?.state ?? {};
+}
+
+/** Detach a state snapshot from the live store so later mutations can't touch
+ *  it and a restore can't alias the store's internal object. */
+function cloneState(state: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(state)) as Record<string, unknown>;
+}
+
+export interface AppProps {
+  /** Injectable runtime factory so tests supply a fake WebLLM lifecycle. */
+  runtimeFactory?: () => WebLlmRuntime;
+  /** Injectable generator so tests drive deterministic streaming outcomes. */
+  generate?: typeof streamSpec;
+  /** Selectable prebuilt LLM records; defaults to the full installed catalog.
+   *  Tests pass a short list to avoid rendering the whole catalog. */
+  modelRecords?: readonly ModelRecord[];
+  /** Cache-membership check for a model id; defaults to WebLLM's official cache
+   *  API wrapper. Injectable so tests never touch the real Cache/IndexedDB. */
+  modelCacheChecker?: (modelId: string) => Promise<boolean>;
+}
+
+export function App({
+  runtimeFactory = createWebLlmRuntime,
+  generate = streamSpec,
+  modelRecords = WEBLLM_PREBUILT_MODELS,
+  modelCacheChecker = isWebLlmModelCached,
+}: AppProps = {}) {
+  const [runtime] = useState(runtimeFactory);
+  // A stable state store owns the rendered UI's live state. Passing it to
+  // `<StateProvider store={...}>` runs the provider in controlled mode, so a
+  // streamed spec's changing `initialState` can never overwrite a value the
+  // user is editing. We swap the instance (and remount via `specVersion`) only
+  // at explicit seed/restore boundaries.
+  const stateStoreRef = useRef<StateStore | null>(null);
+  function activeStore(): StateStore {
+    return (stateStoreRef.current ??= createStateStore({}));
+  }
+  // Bumped whenever a load is superseded (model change, error, teardown) so a
+  // late progress/ready callback for an abandoned load is ignored.
+  const loadRevision = useRef(0);
+  // Tracks mount state so async lifecycle callbacks never touch state after the
+  // component unmounts.
+  const mounted = useRef(true);
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [spec, setSpec] = useState<Spec | null>(null);
   const [specVersion, setSpecVersion] = useState(0);
   const [streamLines, setStreamLines] = useState<string[]>([]);
+  // The exact prompts sent to the model on the latest WebLLM request, surfaced
+  // in the Code pane. `null` when no LLM prompt was sent (Preset, or after New
+  // Conversation).
+  const [prompts, setPrompts] = useState<LlmPrompts | null>(null);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState("preview");
-  const [model, setModel] = useState(() =>
-    stored(MODEL_STORAGE, import.meta.env.VITE_OLLAMA_MODEL ?? DEFAULT_MODEL),
-  );
-  const [port, setPort] = useState(() =>
-    stored(PORT_STORAGE, import.meta.env.VITE_OLLAMA_PORT ?? DEFAULT_PORT),
-  );
-  const [health, setHealth] = useState<
-    "checking" | "online" | "model-missing" | "offline"
-  >("checking");
-  const [models, setModels] = useState<string[]>([]);
-  const [source, setSource] = useState<"preset" | "ollama">(() => {
-    const saved = stored(SOURCE_STORAGE, "");
-    return saved === "ollama" || saved === "preset" ? saved : "preset";
+  const [model, setModel] = useState<WebLlmLoadableModelId>(storedModel);
+  const [modelLifecycle, setModelLifecycle] = useState<ModelLifecycle>({
+    status: "idle",
   });
-  // While true, the source follows Ollama availability (auto-enable). A manual
-  // toggle turns this off so the user's explicit choice always wins.
-  const [sourceAuto, setSourceAuto] = useState(() => !stored(SOURCE_STORAGE, ""));
+  // Model ids whose weights are already in WebLLM's browser cache, shown with a
+  // downloaded indicator. Populated by inspecting the cache (never downloading).
+  const [cachedModels, setCachedModels] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  // Bumped on each cache inspection so a late resolution for a superseded
+  // inspection (model list/source change, or a load taking ownership) is
+  // ignored.
+  const cacheRevision = useRef(0);
+  // Model ids the lifecycle has loaded this session. A successful load proves
+  // the weights are cached, so these stay marked downloaded even when a cache
+  // scan (which may have started before the load) resolves "not cached".
+  const loadedModels = useRef<Set<string>>(new Set());
+  const [source, setSource] = useState<"preset" | "webllm">(() =>
+    stored(SOURCE_STORAGE, "preset") === "webllm" ? "webllm" : "preset",
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [troubleshootOpen, setTroubleshootOpen] = useState(false);
   const [streaming, setStreaming] = useState(
     () => stored(STREAM_STORAGE, "true") !== "false",
   );
 
-  // Probe Ollama on load and whenever the port or model changes (debounced).
+  // Terminate any worker/engine when the playground unmounts so a browser tab
+  // close or navigation never leaks a live WebLLM engine. A rejected disposal
+  // is swallowed — teardown has nowhere to surface it.
   useEffect(() => {
-    let cancelled = false;
-    setHealth("checking");
-    const timer = setTimeout(() => {
-      void checkOllama(port.trim() || DEFAULT_PORT).then((status) => {
-        if (cancelled) return;
-        setModels(status.reachable ? status.chatModels : []);
-        if (!status.reachable) {
-          setHealth("offline");
-        } else if (isModelInstalled(status.models, model.trim() || DEFAULT_MODEL)) {
-          setHealth("online");
-        } else {
-          setHealth("model-missing");
-        }
-        // Auto-enable Ollama when it's reachable, until the user makes an
-        // explicit choice in Settings. Only ever turns Ollama *on* — if it
-        // later goes unreachable we stay in Ollama mode and surface the
-        // Troubleshoot flow instead of silently falling back to Preset.
-        if (sourceAuto && status.reachable) {
-          setSource("ollama");
-        }
-      });
-    }, 350);
+    mounted.current = true;
     return () => {
-      cancelled = true;
-      clearTimeout(timer);
+      mounted.current = false;
+      loadRevision.current += 1;
+      void runtime.dispose().catch(() => undefined);
     };
-  }, [port, model, sourceAuto]);
+  }, [runtime]);
+
+  // Inspect WebLLM's browser cache for every selectable model whenever the
+  // WebLLM model list is on screen. This only reads existing cache entries via
+  // the injected checker; it never triggers a download or `runtime.load`. A
+  // per-model rejection resolves as not cached, and a revision/mount guard
+  // discards results from a superseded inspection.
+  useEffect(() => {
+    if (source !== "webllm" || !settingsOpen) return;
+    const revision = ++cacheRevision.current;
+    void Promise.all(
+      modelRecords.map((record) =>
+        modelCacheChecker(record.model_id).then(
+          (cached) => (cached ? record.model_id : null),
+          () => null,
+        ),
+      ),
+    ).then((ids) => {
+      if (!mounted.current || cacheRevision.current !== revision) return;
+      // Merge, rather than replace, so a scan that resolves after (or races) a
+      // successful load never drops a model the lifecycle just cached.
+      setCachedModels(() => {
+        const next = new Set(
+          ids.filter((id): id is string => id !== null),
+        );
+        for (const id of loadedModels.current) next.add(id);
+        return next;
+      });
+    });
+  }, [source, settingsOpen, modelRecords, modelCacheChecker]);
 
   function persist(key: string, value: string) {
     if (typeof localStorage !== "undefined") {
@@ -139,20 +233,95 @@ export function App() {
     }
   }
 
+  /** Replace the live store with a fresh one seeded from `state` and remount
+   *  the provider so the rendered UI reads the new state atomically. Used to
+   *  seed a completed generation and to restore a rolled-back transaction. */
+  function resetStateStore(state: Record<string, unknown>) {
+    stateStoreRef.current = createStateStore(cloneState(state));
+    setSpecVersion((version) => version + 1);
+  }
+
   function handleSourceChange(value: string) {
-    const next = value === "ollama" ? "ollama" : "preset";
+    const next = value === "webllm" ? "webllm" : "preset";
     setSource(next);
-    setSourceAuto(false);
     persist(SOURCE_STORAGE, next);
   }
 
+  async function handleModelChange(value: WebLlmLoadableModelId) {
+    if (value === model) return;
+    // Changing models abandons any in-flight/ready engine and never downloads
+    // the new one until the user explicitly loads it again.
+    const revision = ++loadRevision.current;
+    setModel(value);
+    persist(MODEL_STORAGE, value);
+    setModelLifecycle({ status: "idle" });
+    try {
+      await runtime.unload();
+    } catch (error) {
+      // Drop a late failure once the component unmounted or a newer lifecycle
+      // superseded this unload, so it never overwrites current state.
+      if (!mounted.current || loadRevision.current !== revision) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setModelLifecycle({ status: "error", message });
+    }
+  }
+
+  async function handleLoadModel() {
+    const revision = ++loadRevision.current;
+    // Supersede any in-flight cache inspection so its stale "not cached"
+    // result can never overwrite the download this load is about to prove.
+    cacheRevision.current += 1;
+    setModelLifecycle({
+      status: "loading",
+      progress: 0,
+      text: "Starting model load",
+    });
+    try {
+      await runtime.load(model, (report: WebLlmProgress) => {
+        if (!mounted.current || loadRevision.current !== revision) return;
+        setModelLifecycle({
+          status: "loading",
+          progress: Math.min(1, Math.max(0, report.progress)),
+          text: report.text,
+        });
+      });
+      if (mounted.current && loadRevision.current === revision) {
+        setModelLifecycle({ status: "ready" });
+        // A successful load guarantees the weights are now cached; record and
+        // reflect it immediately without re-inspecting the cache. Recording it
+        // keeps a later cache scan from dropping it (see the inspection effect).
+        loadedModels.current.add(model);
+        setCachedModels((prev) => {
+          if (prev.has(model)) return prev;
+          const next = new Set(prev);
+          next.add(model);
+          return next;
+        });
+      }
+    } catch (error) {
+      if (!mounted.current || loadRevision.current !== revision) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setModelLifecycle({ status: "error", message });
+    }
+  }
+
+  const selectedModel = webLlmModelInfo(model);
+  const canGenerate = source === "preset" || modelLifecycle.status === "ready";
+
   async function handleSubmit(value: string) {
     const text = value.trim();
-    if (!text || busy) return;
+    if (!text || busy || !canGenerate) return;
 
     const base = Date.now();
-    const modelUsed = model.trim() || DEFAULT_MODEL;
+    // Snapshot the exact spec visible before this request so a failure can
+    // restore it verbatim, discarding any partial progressive updates.
     const baseSpec = spec;
+    // Snapshot the live state (including the user's in-progress edits) so a
+    // failure restores it, discarding any conflicting streamed `/state` values.
+    const stateSnapshot = cloneState(activeStore().getSnapshot());
+    // Capture the load lifecycle generation so a late failure never overwrites
+    // a lifecycle that a newer load/model-change has since produced.
+    const revision = loadRevision.current;
     setInput("");
     setMessages((prev) => [
       ...prev,
@@ -162,46 +331,94 @@ export function App() {
     setStreamLines([]);
     setView("preview");
 
-    const { spec: next, mode, reason } = await streamSpec(
-      text,
-      {
-        model: modelUsed,
-        port: port.trim() || DEFAULT_PORT,
-        source,
-        stream: streaming,
-      },
-      baseSpec,
-      {
-        onSpec: (partial) => setSpec(partial),
-        onLines: (newLines) =>
-          setStreamLines((prev) => [...prev, ...newLines]),
-      },
-    );
-    setSpec(next);
-    // Remount so the finished document seeds the state store from its (now
-    // complete) `spec.state` — the `/state` patches stream in last.
-    setSpecVersion((version) => version + 1);
-    const footer =
-      source === "preset"
-        ? "Preset"
-        : mode === "live"
-          ? `Ollama · ${modelUsed}`
-          : "mock spec";
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: base + 1,
-        role: "assistant",
-        time: now(),
-        footer,
-        spec: next,
-        text:
-          mode === "live"
-            ? "Here's your UI — see the Preview."
-            : (reason ?? "Rendered a UI — see the Preview."),
-      },
-    ]);
-    setBusy(false);
+    try {
+      const result = await generate(
+        text,
+        {
+          source,
+          stream: streaming,
+          engine: source === "webllm" ? runtime.current() : null,
+        },
+        baseSpec,
+        {
+          onSpec: (partial) => setSpec(partial),
+          onLines: (newLines) =>
+            setStreamLines((prev) => [...prev, ...newLines]),
+          onPrompts: (next) => setPrompts(next),
+        },
+      );
+      setSpec(result.spec);
+      // Seed a fresh store from the finished document's (now complete)
+      // `spec.state` — the `/state` patches stream in last — and remount.
+      resetStateStore(specState(result.spec));
+      const footer =
+        source === "preset" ? "Preset" : `WebLLM · ${selectedModel.label}`;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: base + 1,
+          role: "assistant",
+          time: now(),
+          footer,
+          spec: result.spec,
+          text:
+            result.mode === "live"
+              ? "Here's your UI — see the Preview."
+              : (result.reason ?? "Rendered a UI — see the Preview."),
+        },
+      ]);
+    } catch (error) {
+      // Submission is transactional: drop every partial onSpec/onLines from this
+      // request, restore the pre-request spec, and restore the state snapshot so
+      // the user's live edits survive and conflicting streamed state is dropped.
+      setSpec(baseSpec);
+      setStreamLines([]);
+      resetStateStore(stateSnapshot);
+      if (source === "webllm") {
+        const failure =
+          error instanceof WebLlmError
+            ? error
+            : new WebLlmError(
+                "inference-failed",
+                `WebLLM generation failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+                { cause: error },
+              );
+        // Tear down the possibly-wedged engine so generation is disabled until
+        // the user reloads. A rejected unload must not mask the inference error.
+        try {
+          await runtime.unload();
+        } catch {
+          // The visible inference error stays primary; Retry rebuilds the engine.
+        }
+        if (mounted.current && loadRevision.current === revision) {
+          setModelLifecycle({ status: "error", message: failure.message });
+        }
+        if (mounted.current) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: base + 1,
+              role: "assistant",
+              time: now(),
+              footer: `WebLLM · ${selectedModel.label}`,
+              text: failure.message,
+            },
+          ]);
+        }
+      } else if (mounted.current) {
+        // Preset renders a pure sample and should not fail; if it somehow does,
+        // surface it plainly — no WebLLM footer and no lifecycle change.
+        const message = error instanceof Error ? error.message : String(error);
+        setMessages((prev) => [
+          ...prev,
+          { id: base + 1, role: "assistant", time: now(), text: message },
+        ]);
+      }
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
   }
 
   function handleNewConversation() {
@@ -209,8 +426,11 @@ export function App() {
     setMessages([]);
     setSpec(null);
     setStreamLines([]);
+    setPrompts(null);
     setInput("");
     setView("preview");
+    // Start the next generation from a clean state slate.
+    resetStateStore({});
   }
 
   function renderMessage(message: Message) {
@@ -245,27 +465,11 @@ export function App() {
     );
   }
 
-  const statusLabel =
-    health === "checking"
-      ? "Checking Ollama…"
-      : health === "online"
-        ? "Ollama online"
-        : health === "model-missing"
-          ? "Model not installed"
-          : "Ollama offline";
-
   return (
     <div className="app">
       <header className="topbar">
         <div className="brand"><code>json-render-astryx</code> Playground</div>
         <div className="topbar-right">
-          {source === "ollama" && (
-            <span className={`status status--${health}`} role="status">
-              <span className="status-dot" aria-hidden="true" />
-              {statusLabel}
-            </span>
-          )}
-
           <DropdownMenu
             placement="below"
             alignment="end"
@@ -292,48 +496,101 @@ export function App() {
                   size="sm"
                 >
                   <SegmentedControlItem value="preset" label="Preset" />
-                  <SegmentedControlItem value="ollama" label="Ollama" />
+                  <SegmentedControlItem value="webllm" label="WebLLM" />
                 </SegmentedControl>
                 <Text color="secondary" size="sm">
-                  {source === "ollama"
-                    ? "Stream live UIs from your local Ollama server."
+                  {source === "webllm"
+                    ? "Run a prebuilt model in this browser with WebGPU. Loading starts only when you choose Load model."
                     : "Render built-in sample UIs — no model required."}
                 </Text>
               </div>
 
-              {source === "ollama" && (
-                <div className="settings-row">
-                  <label className="field">
-                    <span className="field-label">Ollama port</span>
-                    <input
-                      className="field-input field-input--port"
-                      value={port}
-                      onChange={(event) => {
-                        setPort(event.target.value);
-                        persist(PORT_STORAGE, event.target.value);
-                      }}
-                      placeholder={DEFAULT_PORT}
-                      inputMode="numeric"
-                      spellCheck={false}
-                      autoComplete="off"
-                    />
-                  </label>
+              {source === "webllm" && (
+                <div className="settings-row model-settings">
+                  <span className="field-label">Model</span>
+                  <div
+                    className="model-list"
+                    role="listbox"
+                    aria-label="WebLLM model"
+                  >
+                    {modelRecords.map((record) => {
+                      const isSelected = record.model_id === model;
+                      const isCached = cachedModels.has(record.model_id);
+                      return (
+                        <button
+                          key={record.model_id}
+                          type="button"
+                          role="option"
+                          aria-selected={isSelected}
+                          className="model-option"
+                          disabled={
+                            modelLifecycle.status === "loading" || busy
+                          }
+                          onClick={() =>
+                            void handleModelChange(record.model_id)
+                          }
+                        >
+                          <span className="model-option-check" aria-hidden="true">
+                            {isSelected && <Icon icon="check" size="sm" />}
+                          </span>
+                          <span className="model-option-id">
+                            {record.model_id}
+                          </span>
+                          {isCached && (
+                            <span
+                              className="model-option-cached"
+                              aria-label="Downloaded"
+                              title="Downloaded"
+                            >
+                              <Icon icon={ArrowDownTrayIcon} size="sm" />
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <Text size="sm" weight="medium">
+                    {selectedModel.memory}
+                  </Text>
+                  <Text size="sm" color="secondary">
+                    {selectedModel.note}
+                  </Text>
 
-                  {health === "offline" && (
-                    <div className="settings-alert">
-                      <Text color="secondary" size="sm">
-                        Ollama isn't reachable on port {port.trim() || DEFAULT_PORT}.
-                      </Text>
-                      <Button
-                        label="Troubleshoot"
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => {
-                          setSettingsOpen(false);
-                          setTroubleshootOpen(true);
-                        }}
-                      />
+                  {modelLifecycle.status === "loading" && (
+                    <div className="model-status" role="status">
+                      <progress value={modelLifecycle.progress} max={1} />
+                      <Text size="sm">{modelLifecycle.text}</Text>
                     </div>
+                  )}
+                  {modelLifecycle.status === "ready" && (
+                    <Text size="sm" weight="medium">
+                      Model ready
+                    </Text>
+                  )}
+                  {modelLifecycle.status === "error" && (
+                    <div className="settings-alert" role="alert">
+                      <Text size="sm">{modelLifecycle.message}</Text>
+                      <div className="model-actions">
+                        <Button
+                          label="Retry"
+                          size="sm"
+                          onClick={() => void handleLoadModel()}
+                        />
+                        <Button
+                          label="Use Preset"
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => handleSourceChange("preset")}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {modelLifecycle.status === "idle" && (
+                    <Button
+                      label="Load model"
+                      size="sm"
+                      onClick={() => void handleLoadModel()}
+                    />
                   )}
                 </div>
               )}
@@ -361,9 +618,10 @@ export function App() {
                 onChange={setInput}
                 onSubmit={handleSubmit}
                 placeholder="Describe a UI…"
-                isDisabled={busy}
+                isDisabled={busy || !canGenerate}
                 footerActions={
-                  source === "ollama" ? (
+                  source === "webllm" &&
+                  modelLifecycle.status === "ready" ? (
                     <>
                       <DropdownMenu
                         hasChevron
@@ -398,31 +656,10 @@ export function App() {
                           },
                         ]}
                       />
-                      <DropdownMenu
-                        hasChevron
-                        button={{
-                          label: model.trim() || DEFAULT_MODEL,
-                          icon: <Icon icon={SparklesIcon} size="sm" />,
-                          variant: "ghost",
-                          size: "md",
-                          isDisabled: busy
-                        }}
-                        items={
-                          models.length > 0
-                            ? models.map((name) => ({
-                                label: name,
-                                icon:
-                                  name === model ? (
-                                    <Icon icon="check" />
-                                  ) : undefined,
-                                onClick: () => {
-                                  setModel(name);
-                                  persist(MODEL_STORAGE, name);
-                                },
-                              }))
-                            : [{ label: "No models found", isDisabled: true }]
-                        }
-                      />
+                      <span className="model-chip">
+                        <Icon icon={SparklesIcon} size="sm" />
+                        {selectedModel.label}
+                      </span>
                     </>
                   ) : undefined
                 }
@@ -445,6 +682,7 @@ export function App() {
                       key={suggestion}
                       type="button"
                       className="suggestion"
+                      disabled={busy || !canGenerate}
                       onClick={() => handleSubmit(suggestion)}
                     >
                       {suggestion}
@@ -495,14 +733,9 @@ export function App() {
             {view === "guide" ? (
               <GettingStartedPane />
             ) : view === "code" ? (
-              <SpecPane spec={spec} lines={streamLines} />
+              <SpecPane spec={spec} lines={streamLines} prompts={prompts} />
             ) : spec ? (
-              <StateProvider
-                key={specVersion}
-                initialState={
-                  (spec as { state?: Record<string, unknown> }).state ?? {}
-                }
-              >
+              <StateProvider key={specVersion} store={activeStore()}>
                 <ActionProvider handlers={{}}>
                   <VisibilityProvider>
                     <Renderer spec={spec} registry={registry} loading={busy} />
@@ -517,68 +750,6 @@ export function App() {
           </div>
         </section>
       </main>
-
-      <Dialog
-        isOpen={troubleshootOpen}
-        onOpenChange={setTroubleshootOpen}
-        width={480}
-        purpose="info"
-      >
-        <Layout
-          header={
-            <DialogHeader
-              title="Troubleshoot Ollama"
-              subtitle="Get a local model running, then come back."
-              onOpenChange={setTroubleshootOpen}
-            />
-          }
-          content={
-            <LayoutContent>
-              <ol className="dialog-steps">
-                <li>
-                  <Text weight="medium">Install Ollama</Text>
-                  <Text color="secondary" size="sm">
-                    Download and install it from{" "}
-                    <Link href={OLLAMA_DOWNLOAD_URL} target="_blank">
-                      ollama.com/download
-                    </Link>
-                    , then launch the app.
-                  </Text>
-                </li>
-                <li>
-                  <Text weight="medium">Download a chat model</Text>
-                  <Text color="secondary" size="sm">
-                    In a terminal, pull a chat-completion model, for example{" "}
-                    <Code>ollama pull llama3.2</Code>.
-                  </Text>
-                </li>
-                <li>
-                  <Text weight="medium">Refresh this page</Text>
-                  <Text color="secondary" size="sm">
-                    Once Ollama is running with a model, reload to reconnect.
-                  </Text>
-                </li>
-              </ol>
-            </LayoutContent>
-          }
-          footer={
-            <LayoutFooter hasDivider>
-              <div className="dialog-actions">
-                <Button
-                  label="Close"
-                  variant="secondary"
-                  onClick={() => setTroubleshootOpen(false)}
-                />
-                <Button
-                  label="Refresh this page"
-                  variant="primary"
-                  onClick={() => window.location.reload()}
-                />
-              </div>
-            </LayoutFooter>
-          }
-        />
-      </Dialog>
     </div>
   );
 }

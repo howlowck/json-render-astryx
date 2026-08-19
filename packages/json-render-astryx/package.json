@@ -1,6 +1,6 @@
 {
   "name": "json-render-astryx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Generative UI component library binding json-render to Meta's Astryx components. JSON becomes Astryx-styled React components.",
   "keywords": [
     "json-render",
@@ -46,7 +46,9 @@
       }
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
   "scripts": {
     "build": "tsdown",

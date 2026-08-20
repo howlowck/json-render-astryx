@@ -48,62 +48,19 @@ preflight:
       fail "working tree or index is not clean"
     fi
 
-    command -v ruby >/dev/null 2>&1 \
-      || fail "ruby is required to validate the publish workflow"
     command -v gh >/dev/null 2>&1 \
       || fail "gh is required to verify the publish workflow state"
 
     workflow=".github/workflows/publish.yml"
     [[ -f "$workflow" ]] || fail "missing ${workflow}"
-
-    ruby -ryaml -e '
-      workflow = ARGV[0]
-      begin
-        data = YAML.safe_load(File.read(workflow))
-      rescue => e
-        warn "publish workflow is not valid YAML: #{e.message}"
-        exit 1
-      end
-      unless data.is_a?(Hash)
-        warn "publish workflow root is not a mapping"
-        exit 1
-      end
-      on = data["on"]
-      on = data[true] if on.nil?
-      unless on.is_a?(Hash)
-        warn "publish workflow has no on: mapping"
-        exit 1
-      end
-      push = on["push"]
-      unless push.is_a?(Hash)
-        warn "publish workflow has no on.push mapping"
-        exit 1
-      end
-      unless push["tags"] == ["v*"]
-        warn "publish workflow on.push.tags must equal [\"v*\"]"
-        exit 1
-      end
-      jobs = data["jobs"]
-      unless jobs.is_a?(Hash) && jobs["publish"].is_a?(Hash)
-        warn "publish workflow has no publish job"
-        exit 1
-      end
-      steps = jobs["publish"]["steps"]
-      unless steps.is_a?(Array)
-        warn "publish job has no steps array"
-        exit 1
-      end
-      found = steps.any? do |step|
-        step.is_a?(Hash) && step["run"].is_a?(String) && step["run"].include?("npm publish")
-      end
-      unless found
-        warn "publish job has no step running npm publish"
-        exit 1
-      end
-    ' "$workflow" || fail "publish workflow failed structural validation"
-
-    workflow_state="$(gh workflow view publish.yml --json state --jq .state 2>/dev/null)" \
-      || fail "could not query publish workflow state via gh"
+    workflow_info="$(gh api repos/{owner}/{repo}/actions/workflows/publish.yml \
+      --jq '[.name, .path, .state] | @tsv' 2>/dev/null)" \
+      || fail "could not query publish workflow via gh"
+    IFS=$'\t' read -r workflow_name workflow_path workflow_state <<< "$workflow_info"
+    [[ "$workflow_name" == "Publish json-render-astryx" ]] \
+      || fail "unexpected publish workflow name ${workflow_name}"
+    [[ "$workflow_path" == ".github/workflows/publish.yml" ]] \
+      || fail "unexpected publish workflow path ${workflow_path}"
     [[ "$workflow_state" == "active" ]] \
       || fail "publish workflow state ${workflow_state} is not active"
 

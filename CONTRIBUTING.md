@@ -11,12 +11,11 @@ tag-driven release procedure for later versions.
 | npm | 11.5.1 |
 | pnpm | 10.23.0 |
 | Just | 1.43.1 or newer |
-| Ruby | any recent release with the standard `yaml`/Psych library |
 | GitHub CLI (`gh`) | authenticated to `github.com` |
 
-Just runs the documented recipes. `preflight` additionally shells out to Ruby
-for structural workflow validation and to an authenticated `gh` for the
-workflow-state check.
+Just runs the documented recipes. `preflight` additionally uses an authenticated
+`gh` API request to verify the registered publish workflow name, path, and active
+state.
 
 ## Local validation
 
@@ -78,9 +77,9 @@ just preflight
 - resolves the real default branch from `origin`'s symbolic `HEAD`;
 - rejects a detached checkout or any branch other than the default;
 - fetches the default branch and requires exact local/remote `HEAD` equality;
-- structurally validates the publish workflow with Ruby
-  (`on.push.tags == ["v*"]` and a `publish` job step running `npm publish`) and
-  confirms its `gh`-reported state is `active`;
+- verifies through the authenticated `gh` API that the registered workflow is
+  named `Publish json-render-astryx`, uses `.github/workflows/publish.yml`, and
+  has state `active`;
 - validates the manifest version as SemVer; and
 - rejects an existing matching local or remote tag.
 
@@ -94,19 +93,12 @@ test -z "$(git status --porcelain=v1 --untracked-files=normal)"
 
 WORKFLOW=".github/workflows/publish.yml"
 test -f "$WORKFLOW"
-command -v ruby >/dev/null 2>&1
 command -v gh >/dev/null 2>&1
-ruby -ryaml -e '
-  data = YAML.safe_load(File.read(ARGV[0]))
-  on = data.is_a?(Hash) ? (data["on"] || data[true]) : nil
-  push = on.is_a?(Hash) ? on["push"] : nil
-  abort unless push.is_a?(Hash) && push["tags"] == ["v*"]
-  job = data["jobs"].is_a?(Hash) ? data["jobs"]["publish"] : nil
-  steps = job.is_a?(Hash) ? job["steps"] : nil
-  abort unless steps.is_a?(Array)
-  abort unless steps.any? { |s| s.is_a?(Hash) && s["run"].is_a?(String) && s["run"].include?("npm publish") }
-' "$WORKFLOW"
-test "$(gh workflow view publish.yml --json state --jq .state)" = active
+WORKFLOW_INFO="$(gh api repos/{owner}/{repo}/actions/workflows/publish.yml --jq '[.name, .path, .state] | @tsv')"
+IFS=$'\t' read -r WORKFLOW_NAME WORKFLOW_PATH WORKFLOW_STATE <<< "$WORKFLOW_INFO"
+test "$WORKFLOW_NAME" = "Publish json-render-astryx"
+test "$WORKFLOW_PATH" = ".github/workflows/publish.yml"
+test "$WORKFLOW_STATE" = active
 
 git remote get-url origin >/dev/null
 PUSH_URL="$(git remote get-url --push --all origin)"

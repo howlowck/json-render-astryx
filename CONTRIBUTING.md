@@ -7,13 +7,52 @@ tag-driven release procedure for later versions.
 
 | Tool | Version |
 | --- | --- |
-| Node.js | 22.14.0 |
+| Node.js | 22.18.0 |
 | npm | 11.5.1 |
 | pnpm | 10.23.0 |
+| Just | 1.43.1 or newer |
+| Ruby | any recent release with the standard `yaml`/Psych library |
+| GitHub CLI (`gh`) | authenticated to `github.com` |
+
+Just runs the documented recipes. `preflight` additionally shells out to Ruby
+for structural workflow validation and to an authenticated `gh` for the
+workflow-state check.
 
 ## Local validation
 
-Run these from the repository root before opening a pull request:
+Run `just` to list every available recipe, or `just version` to print the
+current package version.
+
+<details>
+<summary>Equivalent raw version command</summary>
+
+```bash
+node -p "require('./packages/json-render-astryx/package.json').version"
+```
+
+</details>
+
+Run commands from any directory inside the repository. Just resolves every
+recipe from the repository root.
+
+Install the pinned dependencies when setting up or refreshing the checkout:
+
+```bash
+just install
+```
+
+Run the complete local gate before opening a pull request:
+
+```bash
+just check
+```
+
+`just check` runs typecheck, tests, build, and the npm package dry run. The dry
+run lists the tarball contents. Expect `README.md`, `package.json`, and the built
+`dist/` outputs, with no `src`, workspace files, or generated `.tgz`.
+
+<details>
+<summary>Equivalent raw commands</summary>
 
 ```bash
 pnpm install --frozen-lockfile
@@ -23,28 +62,96 @@ pnpm build
 pnpm --filter json-render-astryx exec npm pack --dry-run --json
 ```
 
-The dry run lists the tarball contents. Expect `README.md`, `package.json`, and
-the built `dist/` outputs, with no `src`, workspace files, or generated `.tgz`.
+</details>
 
 ## Default-branch preflight
 
-Run this preflight before every release tag. It resolves origin's real default
-branch, brings it local, fast-forwards to the remote tip, and refuses to
-continue unless the checkout is clean and identical to the remote, so no tag
-ever inherits an arbitrary or stale `HEAD`.
+Run this preflight before every release tag:
 
 ```bash
-DEFAULT_BRANCH="$(git remote show origin | sed -n 's/.*HEAD branch: //p')"
-git fetch origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
-git switch "${DEFAULT_BRANCH}"
-git merge --ff-only "origin/${DEFAULT_BRANCH}"
-test -z "$(git status --porcelain)"
-test "$(git rev-parse HEAD)" = "$(git rev-parse "origin/${DEFAULT_BRANCH}")"
+just preflight
 ```
 
-The two `test` commands are gates. The first fails if the working tree or index
-has any pending change; the second fails unless local `HEAD` matches
-`origin/${DEFAULT_BRANCH}` exactly. Resolve any failure before continuing.
+`just preflight`:
+
+- rejects a dirty index or worktree;
+- resolves the real default branch from `origin`'s symbolic `HEAD`;
+- rejects a detached checkout or any branch other than the default;
+- fetches the default branch and requires exact local/remote `HEAD` equality;
+- structurally validates the publish workflow with Ruby
+  (`on.push.tags == ["v*"]` and a `publish` job step running `npm publish`) and
+  confirms its `gh`-reported state is `active`;
+- validates the manifest version as SemVer; and
+- rejects an existing matching local or remote tag.
+
+<details>
+<summary>Equivalent raw commands</summary>
+
+```bash
+set -euo pipefail
+
+test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
+WORKFLOW=".github/workflows/publish.yml"
+test -f "$WORKFLOW"
+command -v ruby >/dev/null 2>&1
+command -v gh >/dev/null 2>&1
+ruby -ryaml -e '
+  data = YAML.safe_load(File.read(ARGV[0]))
+  on = data.is_a?(Hash) ? (data["on"] || data[true]) : nil
+  push = on.is_a?(Hash) ? on["push"] : nil
+  abort unless push.is_a?(Hash) && push["tags"] == ["v*"]
+  job = data["jobs"].is_a?(Hash) ? data["jobs"]["publish"] : nil
+  steps = job.is_a?(Hash) ? job["steps"] : nil
+  abort unless steps.is_a?(Array)
+  abort unless steps.any? { |s| s.is_a?(Hash) && s["run"].is_a?(String) && s["run"].include?("npm publish") }
+' "$WORKFLOW"
+test "$(gh workflow view publish.yml --json state --jq .state)" = active
+
+git remote get-url origin >/dev/null
+PUSH_URL="$(git remote get-url --push --all origin)"
+test "$(printf '%s\n' "$PUSH_URL" | grep -c .)" -eq 1
+DEFAULT_REF="$(
+  git ls-remote --symref origin HEAD \
+    | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }'
+)"
+case "$DEFAULT_REF" in
+  refs/heads/*) ;;
+  *) printf 'origin HEAD did not resolve to refs/heads/*\n' >&2; exit 1 ;;
+esac
+DEFAULT_BRANCH="${DEFAULT_REF#refs/heads/}"
+CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD)"
+test "$CURRENT_BRANCH" = "$DEFAULT_BRANCH"
+
+git fetch --quiet origin \
+  "+${DEFAULT_REF}:refs/remotes/origin/${DEFAULT_BRANCH}"
+LOCAL_HEAD="$(git rev-parse --verify HEAD)"
+REMOTE_HEAD="$(git rev-parse --verify "refs/remotes/origin/${DEFAULT_BRANCH}")"
+test "$LOCAL_HEAD" = "$REMOTE_HEAD"
+
+VERSION="$(node -p "require('./packages/json-render-astryx/package.json').version")"
+node -e '
+  const version = process.argv[1];
+  const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+  process.exit(semver.test(version) ? 0 : 1);
+' "$VERSION"
+TAG="v${VERSION}"
+if git show-ref --verify --quiet "refs/tags/${TAG}"; then
+  printf 'local tag %s already exists\n' "$TAG" >&2
+  exit 1
+fi
+if git ls-remote --exit-code --tags "$PUSH_URL" "refs/tags/${TAG}" >/dev/null 2>&1; then
+  printf 'remote tag %s already exists\n' "$TAG" >&2
+  exit 1
+else
+  test "$?" -eq 2
+fi
+```
+
+</details>
+
+Preflight gates release tagging so no tag ever inherits an arbitrary or stale
+`HEAD`. Resolve any failure before continuing; never bypass a failing gate.
 
 ## Bootstrap publication status
 
@@ -72,42 +179,51 @@ process uses none; do not add an npm publishing token to this repository.
 
 ## Subsequent releases (tag-driven, tokenless)
 
-> **Automated publishing is currently disabled.** The release workflow in
-> `.github/workflows/publish.yml` is fully commented out, so pushing a version
-> tag today starts no GitHub Actions run and publishes nothing. Before you
-> create or push any release tag, a maintainer must restore the workflow in a
-> reviewed change and confirm the repository's GitHub Actions tab lists the
-> `Publish json-render-astryx` workflow. Do not tag a release until both are
-> done.
-
-After the trusted publisher exists and the workflow is restored, each release is
+After the trusted publisher exists and the workflow is active, each release is
 a pushed version tag. The workflow in `.github/workflows/publish.yml` checks out
 the tag, verifies it equals `v` plus the manifest version, runs the workspace
 gates, and publishes without a token.
 
-1. Choose a semantic version bump. Run one of these inside
-   `packages/json-render-astryx`:
+1. Prepare the version bump:
 
    ```bash
-   npm version patch --no-git-tag-version
-   npm version minor --no-git-tag-version
-   npm version major --no-git-tag-version
+   just bump patch
+   # or: just bump minor
+   # or: just bump major
    ```
 
-   `--no-git-tag-version` edits only the manifest so the version change lands
-   through a reviewed pull request instead of a local tag.
+   `just bump` accepts only `patch`, `minor`, or `major`. It runs
+   `npm version --no-git-tag-version` against
+   `packages/json-render-astryx/package.json` so the version change lands through
+   a reviewed pull request instead of a local tag, then refreshes the lockfile
+   with `pnpm install --lockfile-only`. The `packages/json-render-astryx`
+   importer in `pnpm-lock.yaml` records dependency specifiers but not the
+   package's own version, so a version-only bump normally leaves the lockfile
+   untouched; include a lockfile change only when the bump actually produces one.
 
-2. Refresh the lockfile only when the bump actually changes it. The
-   `packages/json-render-astryx` importer in `pnpm-lock.yaml` records dependency
-   specifiers but not the package's own version, so a version-only bump normally
-   leaves the lockfile untouched. Run the refresh and include the result only
-   when it produces a change:
+   <details>
+   <summary>Equivalent raw commands</summary>
 
    ```bash
+   (
+     cd packages/json-render-astryx
+     npm version patch --no-git-tag-version
+     # or: npm version minor --no-git-tag-version
+     # or: npm version major --no-git-tag-version
+   )
    pnpm install --lockfile-only
    ```
 
-3. Validate locally:
+   </details>
+
+2. Validate locally:
+
+   ```bash
+   just check
+   ```
+
+   <details>
+   <summary>Equivalent raw commands</summary>
 
    ```bash
    pnpm typecheck
@@ -116,34 +232,76 @@ gates, and publishes without a token.
    pnpm --filter json-render-astryx exec npm pack --dry-run --json
    ```
 
-4. Open a pull request with the manifest version change and any lockfile
+   </details>
+
+3. Open a pull request with the manifest version change and any lockfile
    update the bump produced, then merge it to the default branch.
 
-5. Confirm `.github/workflows/publish.yml` is restored and active before running
-   the tag commands below: the GitHub Actions tab must list the
-   `Publish json-render-astryx` workflow. A tag pushed while the workflow stays
-   commented out publishes nothing and leaves an inert tag behind. Then run the
-   [default-branch preflight](#default-branch-preflight) again so the tag lands
-   on a clean default branch whose local `HEAD` equals the remote default-branch
-   tip, derive the version, and create a matching annotated tag:
+4. After review and merge, run the immutable release actions in order:
 
    ```bash
-   VERSION="$(node -p "require('./packages/json-render-astryx/package.json').version")"
-   git tag -a "v${VERSION}" -m "json-render-astryx v${VERSION}"
-   git push origin "v${VERSION}"
+   just preflight
+   just tag
+   just push-tag confirm=PUSH
    ```
 
-6. Push one release tag at a time. The workflow has no concurrency group,
+   - `just tag` creates an annotated local `v<manifest-version>` tag only after
+     `preflight` passes.
+   - `just push-tag` requires the exact literal `confirm=PUSH` argument.
+   - `just push-tag` requires an annotated matching local tag pointing to `HEAD`.
+   - `just push-tag` refuses an existing remote tag and never force-pushes.
+   - Bumping, tagging, and pushing remain separate commands; they are never
+     chained into one release step.
+
+   <details>
+   <summary>Equivalent raw commands</summary>
+
+   ```bash
+  set -euo pipefail
+
+   VERSION="$(node -p "require('./packages/json-render-astryx/package.json').version")"
+   TAG="v${VERSION}"
+   git tag -a "$TAG" -m "json-render-astryx ${TAG}"
+
+   CONFIRM="PUSH"
+   test "$CONFIRM" = "PUSH"
+   test "$(git cat-file -t "refs/tags/${TAG}")" = "tag"
+   test "$(git rev-parse "${TAG}^{commit}")" = "$(git rev-parse HEAD)"
+
+   PUSH_URL="$(git remote get-url --push --all origin)"
+   test "$(printf '%s\n' "$PUSH_URL" | grep -c .)" -eq 1
+   if git ls-remote --exit-code --tags "$PUSH_URL" "refs/tags/${TAG}" >/dev/null 2>&1; then
+     printf 'remote tag %s already exists\n' "$TAG" >&2
+     exit 1
+   else
+     test "$?" -eq 2
+   fi
+   git push --no-follow-tags "$PUSH_URL" "refs/tags/${TAG}:refs/tags/${TAG}"
+   ```
+
+   </details>
+
+5. Push one release tag at a time. The workflow has no concurrency group,
    because GitHub keeps at most one pending run per group and would silently
    drop an older pending tagged release. Pushing tags one at a time gives every
    immutable version its own publish attempt.
 
-7. Verify the release against the public registry before starting another tag:
+6. Verify the release against the public registry before starting another tag:
 
    ```bash
+   just verify-published
+   ```
+
+   <details>
+   <summary>Equivalent raw commands</summary>
+
+   ```bash
+  VERSION="$(node -p "require('./packages/json-render-astryx/package.json').version")"
    NPM_REGISTRY="https://registry.npmjs.org/"
    test "$(npm view json-render-astryx@${VERSION} version --registry="${NPM_REGISTRY}")" = "${VERSION}"
    ```
+
+   </details>
 
    - The Actions run for the tag must finish green.
    - The command above must print no error and confirm the exact version on the
@@ -158,7 +316,7 @@ Every published npm version is permanent; it cannot be overwritten or reused.
 
 | Situation | What happens | Recovery |
 | --- | --- | --- |
-| Tag pushed while the publish workflow is disabled | `.github/workflows/publish.yml` is commented out, so no Actions run starts and nothing is published; the pushed tag is inert | Leave the inert tag in place; pushed tags are immutable. Restore the workflow in a reviewed change and confirm GitHub Actions lists `Publish json-render-astryx`, bump to a new version, merge, then push a new matching version tag. Never delete or move the inert tag. |
+| Tag pushed while the publish workflow is inactive or not recognized by GitHub Actions | No Actions run starts and nothing is published; the pushed tag is inert | Leave the inert tag in place; pushed tags are immutable. Activate or repair the workflow in a reviewed change and confirm GitHub Actions lists `Publish json-render-astryx`, bump to a new version, merge, then push a new matching version tag. Never delete or move the inert tag. |
 | Tag does not match the manifest version | The verify step fails before install, tests, or publish | Leave the pushed tag in place; pushed tags are immutable. Correct the manifest version on the default branch through a reviewed change, then push a new matching version tag. Never delete or move the pushed tag. |
 | Install, typecheck, test, or build fails | The workflow stops before publish and nothing is published | Fix the failure on the default branch, bump the version, refresh the lockfile only if the bump changes it, then push a new matching version tag |
 | npm OIDC or registry failure | The version stays unpublished and the error appears in the workflow log | Before rerunning, query the exact version on the public registry with `npm view json-render-astryx@${VERSION} version --registry=https://registry.npmjs.org/`. If it returns the version, the publish already succeeded; do not rerun. If it returns `E404`, fix the trusted-publisher or registry configuration and rerun the same unchanged tag's workflow. Never delete or move the tag. |

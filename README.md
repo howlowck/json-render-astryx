@@ -43,7 +43,7 @@ This repository is a pnpm and Turborepo workspace.
 
 | Tool | Version |
 | --- | --- |
-| Node.js | 22.14.0 |
+| Node.js | 22.18.0 |
 | npm | 11.5.1 |
 | pnpm | 10.23.0 |
 
